@@ -5,12 +5,8 @@ import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.PersistableBundle
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -32,12 +28,17 @@ import good.damn.editor.editmodes.listeners.VEIListenerOnSelectPoint
 import good.damn.editor.editmodes.listeners.VEIListenerOnSelectShape
 import good.damn.editor.editmodes.listeners.VEIListenerOnTransform
 import good.damn.editor.export.VEExport
-import good.damn.editor.importer.VEImport3
+import good.damn.editor.importer.VEAssetLoader
+import good.damn.editor.importer.VEModelImport
+import good.damn.editor.importer.animation.VEModelImportAnimation
+import good.damn.editor.vector.bottomsheets.VEBottomSheetExportTypes
 import good.damn.editor.vector.bottomsheets.VEBottomSheetMakeFill
+import good.damn.editor.vector.extensions.extension
 import good.damn.editor.vector.fragments.adapter.VEFragmentAdapter
 import good.damn.editor.vector.fragments.VEFragmentVectorAnimation
 import good.damn.editor.vector.fragments.VEFragmentVectorOptions
 import good.damn.editor.vector.importer.VEImportAnimationMutable
+import good.damn.editor.vector.importer.VEMImportAnimationMutable
 import good.damn.editor.vector.launchers.VELauncherPermission
 import good.damn.editor.vector.launchers.VEListenerOnResultPermission
 import good.damn.editor.vector.view.VEViewPaint
@@ -52,6 +53,9 @@ import good.damn.sav.misc.Size
 import good.damn.sav.misc.interfaces.VEIDrawable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
 
 class VEActivityMain
 : AppCompatActivity(),
@@ -66,7 +70,7 @@ VEIListenerOnTransform {
 
     companion object {
         private val TAG = VEActivityMain::class.simpleName
-        private const val FILE_NAME = "export.avs"
+        private const val FILE_NAME = "export"
     }
 
     private var mViewVector: VEViewVectorEditor? = null
@@ -76,7 +80,6 @@ VEIListenerOnTransform {
     private val mBrowserContent = VEBrowserContent().apply {
         onGetContent = this@VEActivityMain
     }
-
 
     private val mProjection = VEMProjection(
         scale = 1.0f,
@@ -112,7 +115,6 @@ VEIListenerOnTransform {
     ).apply {
         onSelectShape = this@VEActivityMain
     }
-
 
     private val modeAnimation = VEEditModeAnimation(
         modeShape.shapes,
@@ -178,7 +180,7 @@ VEIListenerOnTransform {
 
     private var mRoot: FrameLayout? = null
 
-    private var mFileExport: VEFile? = null
+    private var mHasPermissionWrite = false
 
     override fun onCreate(
         savedInstanceState: Bundle?
@@ -385,11 +387,14 @@ VEIListenerOnTransform {
                 this
             )
 
-            post {
-                onGetBrowserContent(
-                    intent.data
-                )
+            intent.data?.let { data ->
+                post {
+                    onGetBrowserContent(
+                        listOf(data)
+                    )
+                }
             }
+
         }
 
         setContentView(
@@ -398,55 +403,15 @@ VEIListenerOnTransform {
     }
 
     override fun onGetBrowserContent(
-        uri: Uri?
-    ) {
-        uri ?: return
-        contentResolver.openInputStream(
-            uri
-        )?.apply {
-
-            val processer = mFragmentVectorAnimation
-                .processer
-
-            val model = VEImport3.animationWrapper(
-                mCanvasSize,
-                this,
-                false,
-                VEImportAnimationMutable(
-                    mCanvasSize,
-                    processer.viewAnimatorEditor!!,
-                    2000
-                )
-            )
-
-            close()
-
-            modeShape.apply {
-                skeleton.resetSkeleton(
-                    model.static.skeleton.points
-                )
-
-                shapes.clear()
-                shapes.addAll(
-                    model.static.shapes
-                )
-
-                groupFill = model.static.groupsFill.first()
-                vectorFill = shapes.firstOrNull()?.fill
-            }
-
-            processer.clearAnimations()
-
-            model.animations?.forEach {
-                processer.addAnimation(
-                    it.id,
-                    it.animation
-                )
-            }
-
-            mViewVector?.invalidate()
+        list: List<Uri>
+    ) = list.forEach { uri ->
+        when (
+            uri.extension
+        ) {
+            "avs" -> loadAssetStaticAnimation(uri)
+            "avss" -> loadAssetStatic(uri)
+            "avsa" -> loadAssetAnimation(uri)
         }
-
     }
 
     override fun draw(
@@ -486,33 +451,79 @@ VEIListenerOnTransform {
         invalidate()
     }
 
-    private inline fun onClickExportVector(
+    private fun onClickExportVector(
         v: View
     ) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            if (mFileExport == null) {
-                mLauncherPermission.launch(
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                )
-                return
-            }
-        } else {
-            mFileExport = VEFile(
-                FILE_NAME
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R && !mHasPermissionWrite) {
+            mLauncherPermission.launch(
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
             )
+            return
         }
 
-        mFileExport?.apply {
-            VEExport.export(
-                modeShape.skeleton,
-                modeShape.shapes,
-                mFragmentVectorAnimation
-                    .processer
-                    .exportAnimations(),
-                mCanvasSize,
-                this
-            )
+        val root = mRoot ?: return
+
+        VEBottomSheetExportTypes(
+            root
+        ).apply {
+            onClickAvs = View.OnClickListener {
+                exportAsset(
+                    "$FILE_NAME.avs"
+                ) {
+                    VEExport.exportStaticAnimation(
+                        modeShape.skeleton,
+                        modeShape.shapes,
+                        mFragmentVectorAnimation
+                            .processer
+                            .exportAnimations(),
+                        mCanvasSize,
+                        it
+                    )
+                }
+                dismiss()
+            }
+
+            onClickAvsa = View.OnClickListener {
+                exportAsset(
+                    "$FILE_NAME.avsa"
+                ) {
+                    VEExport.exportAnimation(
+                        it,
+                        mCanvasSize,
+                        mFragmentVectorAnimation
+                            .processer
+                            .exportAnimations()
+                    )
+                }
+                dismiss()
+            }
+
+            onClickAvss = View.OnClickListener {
+                exportAsset(
+                    "$FILE_NAME.avss"
+                ) {
+                    VEExport.exportStatic(
+                        it,
+                        modeShape.skeleton,
+                        mCanvasSize,
+                        modeShape.shapes
+                    )
+                }
+                dismiss()
+            }
+
+            show()
         }
+    }
+
+    private inline fun exportAsset(
+        fileName: String,
+        process: (OutputStream) -> Unit
+    ) = FileOutputStream(
+        VEFile(fileName)
+    ).run {
+        process(this)
+        close()
     }
 
     private inline fun onClickImportVector(
@@ -552,7 +563,6 @@ VEIListenerOnTransform {
     private inline fun onClickBtnFill(
         v: VEViewPaint
     ) {
-
         val mode = mViewVector?.mode ?: return
         if (mode is VEEditModeAnimation) {
             mFragmentVectorAnimation
@@ -582,38 +592,37 @@ VEIListenerOnTransform {
 
     override fun onScale(
         v: Float
-    ) {
-        mViewVector?.apply {
-            mProjection.scale = v
-            if (v > 1.0f) {
-                val s = 1.0f - (v - 1.0f) / 6.0f
-                mProjection.apply {
-                    radiusPoint = 50f * s
-                    radiusPointsScaled = mProjection.radiusPoint
-                }
+    ) = mViewVector?.run {
 
-                mProjectionAnchor.apply {
-                    radiusPointerScaled = mProjection.radiusPointsScaled
-                    propLenScaled = propLen * s
-                    propMiddlePointLenScaled = propMiddlePointLen * s
-                }
-            } else {
-                mProjection.apply {
-                    radiusPoint = 50f
-                    radiusPointsScaled = radiusPoint * v
-                }
-                mProjectionAnchor.apply {
-                    radiusPointerScaled = mProjection.radiusPointsScaled
-                    propLenScaled = propLen * v
-                    propMiddlePointLenScaled = propMiddlePointLen * v
-                }
+        mProjection.scale = v
+        if (v > 1.0f) {
+            val s = 1.0f - (v - 1.0f) / 6.0f
+            mProjection.apply {
+                radiusPoint = 50f * s
+                radiusPointsScaled = mProjection.radiusPoint
             }
 
-            scale = v
-            updateTransformation()
-            invalidate()
+            mProjectionAnchor.apply {
+                radiusPointerScaled = mProjection.radiusPointsScaled
+                propLenScaled = propLen * s
+                propMiddlePointLenScaled = propMiddlePointLen * s
+            }
+        } else {
+            mProjection.apply {
+                radiusPoint = 50f
+                radiusPointsScaled = radiusPoint * v
+            }
+            mProjectionAnchor.apply {
+                radiusPointerScaled = mProjection.radiusPointsScaled
+                propLenScaled = propLen * v
+                propMiddlePointLenScaled = propMiddlePointLen * v
+            }
         }
-    }
+
+        scale = v
+        updateTransformation()
+        invalidate()
+    } ?: Unit
 
     override fun onTranslate(
         x: Float,
@@ -650,9 +659,7 @@ VEIListenerOnTransform {
 
         when (permission) {
             Manifest.permission.WRITE_EXTERNAL_STORAGE -> {
-                mFileExport = VEFile(
-                    FILE_NAME
-                )
+                mHasPermissionWrite = true
             }
         }
     }
@@ -664,4 +671,86 @@ VEIListenerOnTransform {
             mViewVector?.invalidate()
         }
     }
+
+    private inline fun loadAssetStaticAnimation(
+        uri: Uri
+    ) = VEAssetLoader.loadAssetStaticAnimation(
+        mCanvasSize,
+        contentResolver,
+        createMutableImport(
+            mFragmentVectorAnimation.processer
+        ),
+        uri
+    )?.let {
+        updateStaticConfig(it.first)
+        updateAnimConfig(it.second)
+        mViewVector?.invalidate()
+    }
+
+    private inline fun loadAssetStatic(
+        uri: Uri
+    ) = VEAssetLoader.loadAssetStatic(
+        mCanvasSize,
+        contentResolver,
+        uri
+    )?.let {
+        updateStaticConfig(it)
+        mFragmentVectorAnimation.processer.clearAnimations()
+        mViewVector?.invalidate()
+    }
+
+    private inline fun loadAssetAnimation(
+        uri: Uri
+    ) = VEAssetLoader.loadAssetAnimation(
+        modeShape.shapes,
+        modeShape.skeleton,
+        listOf(
+            modeShape.groupFill
+        ),
+        createMutableImport(
+            mFragmentVectorAnimation.processer
+        ),
+        contentResolver,
+        uri
+    )?.run {
+        updateAnimConfig(this)
+        mViewVector?.invalidate()
+    }
+
+    private inline fun updateStaticConfig(
+        model: VEModelImport
+    ) = modeShape.run {
+        skeleton.resetSkeleton(
+            model.skeleton.points
+        )
+
+        shapes.clear()
+        shapes.addAll(
+            model.shapes
+        )
+
+        groupFill = model.groupsFill.first()
+        vectorFill = shapes.firstOrNull()?.fill
+    }
+
+    private inline fun updateAnimConfig(
+        model: VEModelImportAnimation<VEMImportAnimationMutable>
+    ) = mFragmentVectorAnimation.processer.run {
+        clearAnimations()
+
+        model.animations?.forEach {
+            addAnimation(
+                it.id,
+                it.animation
+            )
+        }
+    }
+
+    private inline fun createMutableImport(
+        processer: VEFragmentVectorProcesser
+    ) = VEImportAnimationMutable(
+        mCanvasSize,
+        processer.viewAnimatorEditor!!,
+        processer.duration
+    )
 }

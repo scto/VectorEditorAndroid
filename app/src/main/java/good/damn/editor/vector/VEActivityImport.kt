@@ -9,11 +9,16 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.net.toFile
+import good.damn.editor.importer.VEAssetLoader
 import good.damn.editor.importer.VEModelImport
 import good.damn.editor.importer.animation.VEModelImportAnimation
 import good.damn.editor.importer.VEViewAVS
+import good.damn.editor.importer.animation.VEImportAnimationDefault
 import good.damn.editor.vector.browsers.VEBrowserContent
 import good.damn.editor.vector.browsers.interfaces.VEListenerOnGetBrowserContent
+import good.damn.editor.vector.extensions.extension
+import good.damn.editor.vector.importer.VEImportAnimationMutable
 import good.damn.sav.core.animation.animators.VEAnimatorGlobal
 import good.damn.sav.core.animation.animators.VEIListenerAnimation
 import good.damn.sav.core.animation.animators.VEIListenerAnimationUpdateFrame
@@ -33,6 +38,7 @@ VEIListenerAnimationUpdateFrame {
     private var mCurrentAnimation: VEModelImportAnimation<
         VEIListenerAnimation
     >? = null
+
     private val mCanvasSize = Size()
     private var mViewAvs: VEViewAVS? = null
 
@@ -126,23 +132,70 @@ VEIListenerAnimationUpdateFrame {
     }
 
     override fun onGetBrowserContent(
-        uri: Uri?
+        list: List<Uri>
+    ) = list.forEach { uri ->
+        when (
+            uri.extension
+        ) {
+            "avs" -> loadAssetStaticAnimation(uri)
+            "avss" -> loadAssetStatic(uri)
+            "avsa" -> loadAssetAnimation(uri)
+        }
+    }
+
+    override suspend fun onUpdateFrameAnimation() = withContext(
+        Dispatchers.Main
     ) {
-        uri ?: return
+        mViewAvs?.invalidate()
+    } ?: Unit
 
-        val inp = contentResolver.openInputStream(
+    private inline fun loadAssetStaticAnimation(
+        uri: Uri
+    ) = VEAssetLoader.loadAssetStaticAnimation(
+        mCanvasSize,
+        contentResolver,
+        VEImportAnimationDefault(
+            mCanvasSize
+        ),
+        uri
+    )?.let {
+        mViewAvs?.model = it.first
+        mCurrentAnimation = it.second.apply {
+            mScrollLayout?.let { lay ->
+                lay.removeAllViews()
+                placeDurations(
+                    lay,
+                    this@VEActivityImport,
+                    this
+                )
+            }
+        }
+    }
+
+    private inline fun loadAssetStatic(
+        uri: Uri
+    ) = VEAssetLoader.loadAssetStatic(
+        mCanvasSize,
+        contentResolver,
+        uri
+    ).let {
+        mViewAvs?.model = it
+        mCurrentAnimation = null
+    }
+
+    private inline fun loadAssetAnimation(
+        uri: Uri
+    ) = mViewAvs?.model?.run {
+        mCurrentAnimation = VEAssetLoader.loadAssetAnimation(
+            shapes,
+            skeleton,
+            groupsFill,
+            VEImportAnimationDefault(
+                mCanvasSize
+            ),
+            contentResolver,
             uri
-        ) ?: return
-
-        mCurrentAnimation = VEModelImport.createAnimationFromStream(
-            inp,
-            mCanvasSize,
-            false
-        ).apply {
-            inp.close()
-
-            mViewAvs?.model = static
-
+        )?.apply {
             mScrollLayout?.let {
                 placeDurations(
                     it,
@@ -152,12 +205,6 @@ VEIListenerAnimationUpdateFrame {
             }
         }
     }
-
-    override suspend fun onUpdateFrameAnimation() = withContext(
-        Dispatchers.Main
-    ) {
-        mViewAvs?.invalidate()
-    } ?: Unit
 
 }
 
